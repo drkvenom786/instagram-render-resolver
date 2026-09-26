@@ -1,0 +1,14 @@
+{
+  "name": "instagram-render-resolver",
+  "version": "1.0.0",
+  "description": "Headless Chromium Instagram Video Resolver Service for Render",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "puppeteer-core": "^22.6.0"
+  }
+}
