@@ -112,10 +112,16 @@ const handleResolve = async (req, res) => {
     });
 
     const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
-    await page.goto(embedUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: 12000
-    });
+    try {
+      await page.goto(embedUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 25000
+      });
+    } catch (navErr) {
+      if (!capturedStreamUrl) {
+        throw navErr;
+      }
+    }
 
     // Evaluate video element in the DOM
     const domVideoUrl = await page.evaluate(async () => {
@@ -170,7 +176,7 @@ const handleResolve = async (req, res) => {
     const audioDownloadUrl = `${baseUrl}/proxy?url=${encodeURIComponent(finalVideoUrl)}&format=audio`;
 
     console.log(`[Resolver] Successfully resolved video URL for ${shortcode}!`);
-    return res.json({
+    const responseObj = {
       success: true,
       status: "success",
       shortcode,
@@ -184,7 +190,16 @@ const handleResolve = async (req, res) => {
       videoUrl: videoStreamingUrl,
       downloadUrl: videoDownloadUrl,
       audioUrl: audioDownloadUrl
-    });
+    };
+
+    let formattedJson = JSON.stringify(responseObj, null, 2);
+    formattedJson = formattedJson.replace(
+      /"(videoStreamingUrl|audioStreamingUrl|videoDownloadUrl|audioDownloadUrl)":/g,
+      '\n  "$1":'
+    );
+
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    return res.send(formattedJson);
 
   } catch (err) {
     console.error(`[Resolver] Error resolving ${shortcode}:`, err.message);
