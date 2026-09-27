@@ -183,13 +183,7 @@ const handleResolve = async (req, res) => {
       videoStreamingUrl,
       audioStreamingUrl,
       videoDownloadUrl,
-      audioDownloadUrl,
-      // Backward-compatibility aliases
-      videoStreamUrl: videoStreamingUrl,
-      audioStreamUrl: audioStreamingUrl,
-      videoUrl: videoStreamingUrl,
-      downloadUrl: videoDownloadUrl,
-      audioUrl: audioDownloadUrl
+      audioDownloadUrl
     };
 
     let formattedJson = JSON.stringify(responseObj, null, 2);
