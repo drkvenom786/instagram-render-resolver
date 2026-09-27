@@ -67,10 +67,14 @@ flowchart TD
     "success": true,
     "status": "success",
     "shortcode": "DbFXzUHoDFf",
-    "videoUrl": "https://scontent-xxx.cdninstagram.com/v/t50.2886-16/...",
-    "downloadUrl": "http://localhost:3000/proxy?url=https%3A%2F%2Fscontent-xxx...",
-    "audioDownloadUrl": "http://localhost:3000/proxy?url=https%3A%2F%2Fscontent-xxx...&format=audio",
-    "audioUrl": "http://localhost:3000/proxy?url=https%3A%2F%2Fscontent-xxx...&format=audio"
+
+    "videoStreamingUrl": "https://scontent-xxx.cdninstagram.com/...mp4",
+
+    "audioStreamingUrl": "http://localhost:3000/proxy?url=https%3A%2F%2Fscontent-xxx...&format=audio&mode=stream",
+
+    "videoDownloadUrl": "http://localhost:3000/proxy?url=https%3A%2F%2Fscontent-xxx...",
+
+    "audioDownloadUrl": "http://localhost:3000/proxy?url=https%3A%2F%2Fscontent-xxx...&format=audio"
   }
   ```
 - **Error Response (`404 Not Found`):**

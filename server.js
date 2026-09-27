@@ -2,10 +2,12 @@ const express = require("express");
 const cors = require("cors");
 const puppeteer = require("puppeteer-core");
 const { Readable } = require("stream");
+const { spawn } = require("child_process");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.set("json spaces", 2);
 
 const PORT = process.env.PORT || 3000;
 const CHROMIUM_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium";
@@ -36,12 +38,12 @@ app.get("/", (req, res) => {
         method: "GET | POST",
         path: "/resolve?url={INSTAGRAM_URL}",
         example: `${baseUrl}/resolve?url=https://www.instagram.com/reel/DbFXzUHoDFf/`,
-        description: "Resolves direct video stream, MP4 download link, and MP3 audio download link."
+        description: "Resolves videoStreamingUrl, audioStreamingUrl, videoDownloadUrl, and audioDownloadUrl."
       },
       proxy: {
         method: "GET",
-        path: "/proxy?url={VIDEO_STREAM_URL}&format={video|audio}",
-        description: "Streams media directly with CORS headers and attachment headers for instant file download."
+        path: "/proxy?url={VIDEO_STREAM_URL}&format={video|audio}&mode={download|stream}",
+        description: "Streams media directly with CORS headers. When format=audio, converts on the fly to pure MP3 via ffmpeg."
       }
     }
   });
@@ -157,7 +159,14 @@ const handleResolve = async (req, res) => {
     const protocol = req.get("x-forwarded-proto") || req.protocol || "http";
     const baseUrl = `${protocol}://${host}`;
 
-    const downloadUrl = `${baseUrl}/proxy?url=${encodeURIComponent(finalVideoUrl)}`;
+    // 4 Distinct Links:
+    // 1. videoStreamingUrl: direct video stream for player playback
+    const videoStreamingUrl = finalVideoUrl;
+    // 2. audioStreamingUrl: MP3 audio stream for inline audio player playback
+    const audioStreamingUrl = `${baseUrl}/proxy?url=${encodeURIComponent(finalVideoUrl)}&format=audio&mode=stream`;
+    // 3. videoDownloadUrl: direct MP4 video file download trigger
+    const videoDownloadUrl = `${baseUrl}/proxy?url=${encodeURIComponent(finalVideoUrl)}`;
+    // 4. audioDownloadUrl: direct MP3 audio file download trigger (converted via ffmpeg)
     const audioDownloadUrl = `${baseUrl}/proxy?url=${encodeURIComponent(finalVideoUrl)}&format=audio`;
 
     console.log(`[Resolver] Successfully resolved video URL for ${shortcode}!`);
@@ -165,9 +174,15 @@ const handleResolve = async (req, res) => {
       success: true,
       status: "success",
       shortcode,
-      videoUrl: finalVideoUrl,
-      downloadUrl,
+      videoStreamingUrl,
+      audioStreamingUrl,
+      videoDownloadUrl,
       audioDownloadUrl,
+      // Backward-compatibility aliases
+      videoStreamUrl: videoStreamingUrl,
+      audioStreamUrl: audioStreamingUrl,
+      videoUrl: videoStreamingUrl,
+      downloadUrl: videoDownloadUrl,
       audioUrl: audioDownloadUrl
     });
 
@@ -193,11 +208,71 @@ app.post("/api/download", handleResolve);
 const handleProxy = async (req, res) => {
   const mediaUrl = req.query.url;
   const format = req.query.format || req.query.as;
+  const mode = req.query.mode;
 
   if (!mediaUrl) {
     return res.status(400).send("Missing 'url' query parameter");
   }
 
+  const isAudio = format === "audio" || format === "mp3";
+  const isStream = mode === "stream" || mode === "inline";
+
+  // If format is audio, use ffmpeg to extract and convert audio to real MP3
+  if (isAudio) {
+    console.log("[Proxy] Converting media to pure MP3 via ffmpeg...");
+
+    const disposition = isStream ? "inline" : 'attachment; filename="instagram_audio.mp3"';
+
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+    res.setHeader("Content-Disposition", disposition);
+    res.setHeader("Content-Type", "audio/mpeg");
+
+    let ffmpegProcess = null;
+
+    try {
+      ffmpegProcess = spawn("ffmpeg", [
+        "-hide_banner",
+        "-loglevel", "error",
+        "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36\r\nReferer: https://www.instagram.com/\r\n",
+        "-i", mediaUrl,
+        "-vn",
+        "-acodec", "libmp3lame",
+        "-b:a", "192k",
+        "-f", "mp3",
+        "pipe:1"
+      ]);
+
+      ffmpegProcess.stdout.pipe(res);
+
+      ffmpegProcess.stderr.on("data", (chunk) => {
+        console.error(`[FFmpeg error] ${chunk}`);
+      });
+
+      ffmpegProcess.on("error", (err) => {
+        console.error("[FFmpeg spawn error]:", err.message);
+        if (!res.headersSent) {
+          res.status(500).send(`Audio conversion failed: ${err.message}`);
+        }
+      });
+
+      res.on("close", () => {
+        try {
+          if (ffmpegProcess) ffmpegProcess.kill("SIGKILL");
+        } catch {}
+      });
+
+      return;
+    } catch (ffmpegErr) {
+      console.error("[Proxy] FFmpeg exception:", ffmpegErr);
+      if (!res.headersSent) {
+        return res.status(500).send("Failed to start audio conversion");
+      }
+      return;
+    }
+  }
+
+  // Otherwise, stream MP4 video
   try {
     const cdnRes = await fetch(mediaUrl, {
       headers: {
@@ -212,14 +287,12 @@ const handleProxy = async (req, res) => {
       return res.status(cdnRes.status).send(`Failed to stream media from CDN: HTTP ${cdnRes.status}`);
     }
 
-    const isAudio = format === "audio" || format === "mp3";
-    const filename = isAudio ? "instagram_audio.mp3" : "instagram_video.mp4";
-    const contentType = isAudio ? "audio/mpeg" : (cdnRes.headers.get("content-type") || "video/mp4");
+    const disposition = isStream ? "inline" : 'attachment; filename="instagram_video.mp4"';
 
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", disposition);
+    res.setHeader("Content-Type", cdnRes.headers.get("content-type") || "video/mp4");
 
     const length = cdnRes.headers.get("content-length");
     if (length) {

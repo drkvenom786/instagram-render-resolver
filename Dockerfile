@@ -1,8 +1,9 @@
 FROM node:20-slim
 
-# Install Chromium and necessary runtime dependencies
+# Install Chromium, ffmpeg, and necessary runtime dependencies
 RUN apt-get update && apt-get install -y \
     chromium \
+    ffmpeg \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
