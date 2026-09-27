@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const puppeteer = require("puppeteer-core");
+const { Readable } = require("stream");
 
 const app = express();
 app.use(cors());
@@ -21,23 +22,39 @@ function extractShortcode(urlStr) {
   }
 }
 
-// Health check endpoint
+// Health check & Documentation endpoint
 app.get("/", (req, res) => {
+  const host = req.get("x-forwarded-host") || req.get("host");
+  const protocol = req.get("x-forwarded-proto") || req.protocol || "http";
+  const baseUrl = `${protocol}://${host}`;
+
   res.json({
+    service: "Instagram Headless Media Resolver API",
     status: "online",
-    service: "Instagram Headless Resolver (Render)",
-    usage: "/resolve?shortcode=XYZ or /resolve?url=https://www.instagram.com/reel/XYZ/"
+    endpoints: {
+      resolve: {
+        method: "GET | POST",
+        path: "/resolve?url={INSTAGRAM_URL}",
+        example: `${baseUrl}/resolve?url=https://www.instagram.com/reel/DbFXzUHoDFf/`,
+        description: "Resolves direct video stream, MP4 download link, and MP3 audio download link."
+      },
+      proxy: {
+        method: "GET",
+        path: "/proxy?url={VIDEO_STREAM_URL}&format={video|audio}",
+        description: "Streams media directly with CORS headers and attachment headers for instant file download."
+      }
+    }
   });
 });
 
-// Main Resolver endpoint: launches headless Chromium to resolve the embed page like an Android WebView
-app.get("/resolve", async (req, res) => {
-  const target = req.query.url || req.query.shortcode;
+// Main Media Resolver Handler
+const handleResolve = async (req, res) => {
+  const target = req.query.url || req.query.shortcode || req.body?.url || req.body?.shortcode;
   if (!target) {
-    return res.status(400).json({ error: "Missing 'url' or 'shortcode' query parameter" });
+    return res.status(400).json({ error: "Missing 'url' or 'shortcode' parameter" });
   }
 
-  const shortcode = extractShortcode(target) || target.replace(/[^A-Za-z0-9_-]/g, "");
+  const shortcode = extractShortcode(target) || String(target).replace(/[^A-Za-z0-9_-]/g, "");
   if (!shortcode) {
     return res.status(400).json({ error: "Invalid shortcode or Instagram link" });
   }
@@ -63,8 +80,8 @@ app.get("/resolve", async (req, res) => {
     });
 
     const page = await browser.newPage();
-    
-    // Set realistic mobile/desktop User-Agent
+
+    // Set realistic User-Agent
     await page.setUserAgent(
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     );
@@ -73,20 +90,22 @@ app.get("/resolve", async (req, res) => {
     await page.setRequestInterception(true);
     let capturedStreamUrl = null;
 
-    page.on("request", (req) => {
-      const type = req.resourceType();
-      const url = req.url().toLowerCase();
+    page.on("request", (interceptedReq) => {
+      const type = interceptedReq.resourceType();
+      const url = interceptedReq.url().toLowerCase();
 
-      // Intercept any media streaming URLs
-      if ((url.includes("cdninstagram.com") || url.includes("fbcdn.net")) &&
-          (url.includes(".mp4") || url.includes("mime_type=video") || url.includes("/v/t50.") || url.includes("/v/t0."))) {
-        capturedStreamUrl = req.url();
+      // Intercept media streaming URLs from Instagram CDN
+      if (
+        (url.includes("cdninstagram.com") || url.includes("fbcdn.net")) &&
+        (url.includes(".mp4") || url.includes("mime_type=video") || url.includes("/v/t50.") || url.includes("/v/t0."))
+      ) {
+        capturedStreamUrl = interceptedReq.url();
       }
 
       if (type === "image" || type === "font" || type === "stylesheet") {
-        req.abort();
+        interceptedReq.abort();
       } else {
-        req.continue();
+        interceptedReq.continue();
       }
     });
 
@@ -96,7 +115,7 @@ app.get("/resolve", async (req, res) => {
       timeout: 12000
     });
 
-    // Evaluate the same logic as the Android WebView
+    // Evaluate video element in the DOM
     const domVideoUrl = await page.evaluate(async () => {
       const maxAttempts = 20;
       for (let i = 0; i < maxAttempts; i++) {
@@ -111,7 +130,7 @@ app.get("/resolve", async (req, res) => {
           return vSource.src;
         }
 
-        // Click play/consent buttons if needed
+        // Trigger play if needed
         const btns = document.querySelectorAll('button, div[role="button"], .PlayButton, .EmbeddedMediaImage');
         for (const btn of btns) {
           try { btn.click(); } catch(e) {}
@@ -128,27 +147,109 @@ app.get("/resolve", async (req, res) => {
       console.log(`[Resolver] Failed to resolve video for ${shortcode}`);
       return res.status(404).json({
         success: false,
+        status: "error",
         error: "Unable to extract video stream. Post may be private or removed.",
         shortcode
       });
     }
 
+    const host = req.get("x-forwarded-host") || req.get("host");
+    const protocol = req.get("x-forwarded-proto") || req.protocol || "http";
+    const baseUrl = `${protocol}://${host}`;
+
+    const downloadUrl = `${baseUrl}/proxy?url=${encodeURIComponent(finalVideoUrl)}`;
+    const audioDownloadUrl = `${baseUrl}/proxy?url=${encodeURIComponent(finalVideoUrl)}&format=audio`;
+
     console.log(`[Resolver] Successfully resolved video URL for ${shortcode}!`);
     return res.json({
       success: true,
+      status: "success",
       shortcode,
-      videoUrl: finalVideoUrl
+      videoUrl: finalVideoUrl,
+      downloadUrl,
+      audioDownloadUrl,
+      audioUrl: audioDownloadUrl
     });
 
   } catch (err) {
     console.error(`[Resolver] Error resolving ${shortcode}:`, err.message);
-    return res.status(500).json({ success: false, error: err.message, shortcode });
+    return res.status(500).json({ success: false, status: "error", error: err.message, shortcode });
   } finally {
     if (browser) {
       try { await browser.close(); } catch(e) {}
     }
   }
-});
+};
+
+// Map resolver endpoints
+app.get("/resolve", handleResolve);
+app.post("/resolve", handleResolve);
+app.get("/download", handleResolve);
+app.post("/download", handleResolve);
+app.get("/api/download", handleResolve);
+app.post("/api/download", handleResolve);
+
+// Proxy stream to bypass Instagram CDN CORS & trigger instant download (MP4 video or MP3 audio)
+const handleProxy = async (req, res) => {
+  const mediaUrl = req.query.url;
+  const format = req.query.format || req.query.as;
+
+  if (!mediaUrl) {
+    return res.status(400).send("Missing 'url' query parameter");
+  }
+
+  try {
+    const cdnRes = await fetch(mediaUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://www.instagram.com/",
+        "Accept": "*/*"
+      }
+    });
+
+    if (!cdnRes.ok) {
+      return res.status(cdnRes.status).send(`Failed to stream media from CDN: HTTP ${cdnRes.status}`);
+    }
+
+    const isAudio = format === "audio" || format === "mp3";
+    const filename = isAudio ? "instagram_audio.mp3" : "instagram_video.mp4";
+    const contentType = isAudio ? "audio/mpeg" : (cdnRes.headers.get("content-type") || "video/mp4");
+
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Type", contentType);
+
+    const length = cdnRes.headers.get("content-length");
+    if (length) {
+      res.setHeader("Content-Length", length);
+    }
+
+    const nodeStream = Readable.fromWeb(cdnRes.body);
+
+    nodeStream.on("error", (err) => {
+      console.error("[Proxy] Streaming error:", err.message);
+      if (!res.headersSent) {
+        res.status(500).send("Stream error");
+      }
+    });
+
+    res.on("close", () => {
+      nodeStream.destroy();
+    });
+
+    nodeStream.pipe(res);
+  } catch (err) {
+    console.error("[Proxy] Fetch error:", err.message);
+    if (!res.headersSent) {
+      res.status(500).send(`Error streaming media: ${err.message}`);
+    }
+  }
+};
+
+app.get("/proxy", handleProxy);
+app.get("/api/proxy", handleProxy);
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Instagram Headless Resolver running on port ${PORT}`);
